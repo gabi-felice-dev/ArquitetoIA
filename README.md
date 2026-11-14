@@ -1,5 +1,8 @@
 # ArquitetoIA — Sistema de Atendimento Inteligente com RAG e MCP
 
+<img width="1913" height="1008" alt="image" src="https://github.com/user-attachments/assets/ec67dc24-f0a8-4d49-bfdc-9e5eb64427e1" />
+
+
 Projeto em **.NET 10** com implementação de **RAG (Retrieval-Augmented Generation)** integrado via **MCP (Model Context Protocol)** e **PostgreSQL + pgvector**, disponível em **duas versões** na mesma Solution:
 
 1. **Versão Online (OpenAI)** — `Api.Conhecimento` (`:5133`) e `Api.Atendimento` (`:5065`)
