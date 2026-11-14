@@ -2,7 +2,10 @@
   <Folder Name="/Itens de Solução/">
     <File Path="docker-compose.yml" />
     <File Path="schema.sql" />
+    <File Path="README.md" />
   </Folder>
   <Project Path="Api.Atendimento/Api.Atendimento.csproj" />
   <Project Path="Api.Conhecimento/Api.Conhecimento.csproj" />
+  <Project Path="Api.Atendimento.Offline/Api.Atendimento.Offline.csproj" />
+  <Project Path="Api.Conhecimento.Offline/Api.Conhecimento.Offline.csproj" />
 </Solution>

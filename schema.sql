@@ -25,6 +25,21 @@ CREATE INDEX ix_chunks_embedding
 ON conhecimento.chunks
 USING hnsw (embedding vector_cosine_ops);
 
+CREATE TABLE IF NOT EXISTS conhecimento.chunks_offline (
+    id UUID PRIMARY KEY,
+    documento_id UUID NOT NULL
+        REFERENCES conhecimento.documentos(id) ON DELETE CASCADE,
+    ordem INTEGER NOT NULL,
+    conteudo TEXT NOT NULL,
+    modelo_embedding VARCHAR(100) NOT NULL,
+    embedding VECTOR(768) NOT NULL,
+    UNIQUE(documento_id, ordem)
+);
+
+CREATE INDEX IF NOT EXISTS ix_chunks_offline_embedding
+ON conhecimento.chunks_offline
+USING hnsw (embedding vector_cosine_ops);
+
 CREATE TABLE auditoria.consumos (
     id UUID PRIMARY KEY,
     execucao_id UUID NOT NULL,
