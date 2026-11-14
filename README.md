@@ -4,6 +4,23 @@ Projeto em **.NET 10** com implementação de **RAG (Retrieval-Augmented Generat
 
 1. **Versão Online (OpenAI)** — `Api.Conhecimento` (`:5133`) e `Api.Atendimento` (`:5065`)
 2. **Versão Offline 100% Gratuita (Ollama)** — `Api.Conhecimento.Offline` (`:5134`) e `Api.Atendimento.Offline` (`:5066`)
+3. **Frontend em React (`web-chat` em `:5173`)** — Interface unificada de Chat e Ingestão de Conhecimento com seletor em tempo real entre **Offline (Ollama)** e **Online (OpenAI)**
+
+---
+
+## Como Iniciar o Frontend em React (`web-chat`)
+
+Com as APIs desejadas (Offline, Online ou ambas) rodando, abra um terminal e execute:
+
+```powershell
+npm --prefix .\web-chat run dev
+```
+
+O navegador abrirá automaticamente em **[http://localhost:5173](http://localhost:5173)**:
+- **Seletor no Topo:** Alterne em 1 clique entre `Offline (Ollama — Gratuito)` e `Online (OpenAI)`.
+- **Indicador de Status:** Mostra em tempo real se as APIs de Atendimento e Conhecimento/MCP estão `online` ou `offline`.
+- **Aba "Base de Conhecimento":** Permite cadastrar documentos diretamente pela tela (já vem preenchida com um exemplo pronto para testar).
+- **Aba "Chat de Atendimento":** Possui perguntas rápidas de teste e exibe os metadados completos da resposta (`informacaoEncontrada`, `encaminharParaHumano`, `custoEstimadoUsd` e os `chunks` usados como fonte via MCP).
 
 ---
 

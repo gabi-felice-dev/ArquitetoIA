@@ -5,6 +5,9 @@ using Scalar.AspNetCore;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
+builder.Services.AddCors(options =>
+    options.AddDefaultPolicy(policy =>
+        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 builder.WebHost.UseUrls("http://localhost:5134");
 
@@ -22,6 +25,7 @@ var app = builder.Build();
 
 await app.EnsureDatabaseAsync();
 
+app.UseCors();
 app.UseExceptionHandler();
 
 app.MapGet("/health", () => Results.Ok(new

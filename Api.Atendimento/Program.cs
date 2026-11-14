@@ -6,6 +6,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://localhost:5065");
 
 builder.Services.AddOpenApi();
+builder.Services.AddCors(options =>
+    options.AddDefaultPolicy(policy =>
+        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 builder.Services.AddProblemDetails();
 builder.Services.AddInfra(builder.Configuration);
@@ -15,6 +18,7 @@ builder.Services.AddTransient<AtendimentoService>();
 
 var app = builder.Build();
 
+app.UseCors();
 app.UseExceptionHandler();
 
 app.MapGet("/health", () => Results.Ok(new

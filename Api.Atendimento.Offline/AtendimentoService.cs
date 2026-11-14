@@ -37,60 +37,16 @@ public sealed class AtendimentoService(
     ConsumoRepository consumos)
 {
     private const string SystemPrompt = """
-        IDENTIDADE:
-        Você é o assistente virtual de atendimento da COTI Informática.
-        Seu papel é atender alunos, futuros alunos e clientes com
-        educação, clareza, simpatia e profissionalismo.
-
-        OBJETIVO:
-        Ajudar o usuário a esclarecer dúvidas sobre a COTI Informática,
-        seus cursos e serviços, usando exclusivamente os fatos
-        sustentados pelos trechos recuperados da base de conhecimento.
-
-        REGRAS SOBRE A BASE DE CONHECIMENTO:
-        1. Utilize exclusivamente os fatos sustentados pelos trechos
-           recuperados. Não complete informações com conhecimento
-           externo, suposições ou lembranças.
-        2. Responda sempre em português do Brasil.
-        3. Se o contexto sustentar suficientemente a resposta:
-           - informacaoEncontrada = true
-           - encaminharParaHumano = false
-           - fontes deve conter o valor exato do campo "id" dos trechos usados.
-        4. Se o contexto não sustentar suficientemente a resposta:
-           - informacaoEncontrada = false
-           - encaminharParaHumano = true
-           - fontes = []
-        5. Retorne exclusivamente o objeto JSON definido pelo schema.
-        """;
-
-    private const string Schema = """
+        Você é o assistente virtual da COTI Informática.
+        Responda em português do Brasil de forma curta e objetiva usando APENAS o contexto fornecido.
+        Retorne EXCLUSIVAMENTE um objeto JSON válido no formato:
         {
-          "type": "object",
-          "properties": {
-            "resposta": {
-              "type": "string"
-            },
-            "informacaoEncontrada": {
-              "type": "boolean"
-            },
-            "encaminharParaHumano": {
-              "type": "boolean"
-            },
-            "fontes": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "required": [
-            "resposta",
-            "informacaoEncontrada",
-            "encaminharParaHumano",
-            "fontes"
-          ],
-          "additionalProperties": false
+          "resposta": "texto para o aluno",
+          "informacaoEncontrada": true,
+          "encaminharParaHumano": false,
+          "fontes": ["id-do-chunk"]
         }
+        Se a resposta não estiver no contexto, defina informacaoEncontrada=false, encaminharParaHumano=true e fontes=[].
         """;
 
     public async Task<AtendimentoResponse> ExecutarAsync(
@@ -98,12 +54,19 @@ public sealed class AtendimentoService(
         CancellationToken ct)
     {
         var execucaoId = Guid.NewGuid();
+        var swTotal = System.Diagnostics.Stopwatch.StartNew();
+
+        Console.WriteLine($"[Atendimento.Offline] [{execucaoId}] 1/3 Consultando MCP (embedding + pgvector)...");
+        var swMcp = System.Diagnostics.Stopwatch.StartNew();
 
         // 1. Recuperação obrigatória via MCP.
         var trechos = await conhecimento.BuscarAsync(
             pergunta,
             execucaoId,
             ct);
+
+        swMcp.Stop();
+        Console.WriteLine($"[Atendimento.Offline] [{execucaoId}] MCP concluído em {swMcp.ElapsedMilliseconds} ms ({trechos.Count} trecho(s) encontrado(s)).");
 
         if (trechos.Count == 0)
         {
@@ -121,28 +84,17 @@ public sealed class AtendimentoService(
                 ct);
         }
 
-        var contexto = JsonSerializer.Serialize(
-            trechos.Select(t => new
-            {
-                id = t.Id.ToString(),
-                titulo = t.Titulo,
-                fonte = t.Fonte,
-                conteudo = t.Conteudo
-            }));
+        var contextoTexto = string.Join(
+            "\n---\n",
+            trechos.Select(t => $"ID: {t.Id}\nTítulo: {t.Titulo}\nConteúdo: {t.Conteudo}"));
 
-        var entradaUsuario = JsonSerializer.Serialize(new
-        {
-            pergunta,
-            contextoRecuperado = JsonSerializer.Deserialize<JsonElement>(
-                contexto)
-        });
-
-        using var schemaDocument = JsonDocument.Parse(Schema);
+        var entradaUsuario = $"Contexto:\n{contextoTexto}\n\nPergunta: {pergunta}";
 
         var payload = new
         {
             model = ollama.ChatModel,
-            max_completion_tokens = 800,
+            temperature = 0.1,
+            max_tokens = 300,
             messages = new[]
             {
                 new
@@ -158,15 +110,12 @@ public sealed class AtendimentoService(
             },
             response_format = new
             {
-                type = "json_schema",
-                json_schema = new
-                {
-                    name = "resposta_atendimento",
-                    strict = true,
-                    schema = schemaDocument.RootElement.Clone()
-                }
+                type = "json_object"
             }
         };
+
+        Console.WriteLine($"[Atendimento.Offline] [{execucaoId}] 2/3 Gerando resposta no Ollama ({ollama.ChatModel})...");
+        var swLlm = System.Diagnostics.Stopwatch.StartNew();
 
         // 2. Geração via Ollama local (100% gratuito).
         var response = await ollama.PostAsync(
@@ -176,6 +125,9 @@ public sealed class AtendimentoService(
             "resposta_chat_offline",
             embedding: false,
             ct: ct);
+
+        swLlm.Stop();
+        Console.WriteLine($"[Atendimento.Offline] [{execucaoId}] Ollama respondeu em {swLlm.ElapsedMilliseconds} ms (Total: {swTotal.ElapsedMilliseconds} ms).");
 
         var choice = response.GetProperty("choices")[0];
         var message = choice.GetProperty("message");
