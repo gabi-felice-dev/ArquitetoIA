@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/Itens de Solução/">
+    <File Path="docker-compose.yml" />
+    <File Path="schema.sql" />
+  </Folder>
+  <Project Path="Api.Atendimento/Api.Atendimento.csproj" />
+  <Project Path="Api.Conhecimento/Api.Conhecimento.csproj" />
+</Solution>
