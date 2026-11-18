@@ -14,7 +14,7 @@ const ENVIRONMENTS = {
   online: {
     id: 'online',
     name: 'OpenAI Cloud',
-    subtitle: 'API Oficial · Online',
+    subtitle: 'API Oficial + Memória MongoDB',
     models: 'gpt-6-luna · text-embedding-3-small',
     atendimentoUrl: 'http://localhost:5065',
     conhecimentoUrl: 'http://localhost:5133',
@@ -48,13 +48,14 @@ const SAMPLE_DOCUMENT = {
 }
 
 export default function App() {
-  const [envKey, setEnvKey] = useState('offline')
+  const [envKey, setEnvKey] = useState('online')
   const [health, setHealth] = useState({
     atendimento: 'checking',
     conhecimento: 'checking',
   })
 
   // Chat state
+  const [nomeCliente, setNomeCliente] = useState('Gabriel')
   const [messages, setMessages] = useState([])
   const [question, setQuestion] = useState('')
   const [loadingChat, setLoadingChat] = useState(false)
@@ -110,9 +111,31 @@ export default function App() {
     }))
   }
 
+  const handleClearConversation = async () => {
+    setMessages([])
+    if (envKey === 'online' && nomeCliente.trim().length >= 2) {
+      try {
+        await fetch(
+          `${currentEnv.atendimentoUrl}/api/atendimentos/historico?nome=${encodeURIComponent(
+            nomeCliente.trim()
+          )}`,
+          { method: 'DELETE' }
+        )
+      } catch {
+        // Ignora erro caso API esteja desligada
+      }
+    }
+  }
+
   const handleSendQuestion = async (customQuestion) => {
     const textToSend = (customQuestion ?? question).trim()
     if (!textToSend || loadingChat) return
+
+    const trimmedNome = nomeCliente.trim()
+    if (envKey === 'online' && (trimmedNome.length < 2 || trimmedNome.length > 100)) {
+      alert('No modo Online, informe o Nome do cliente (entre 2 e 100 caracteres).')
+      return
+    }
 
     if (!customQuestion) setQuestion('')
 
@@ -120,6 +143,7 @@ export default function App() {
       id: crypto.randomUUID(),
       role: 'user',
       env: envKey,
+      authorName: envKey === 'online' ? trimmedNome : 'Você',
       text: textToSend,
     }
 
@@ -127,12 +151,17 @@ export default function App() {
     setLoadingChat(true)
 
     try {
+      const payload =
+        envKey === 'online'
+          ? { nome: trimmedNome, pergunta: textToSend }
+          : { pergunta: textToSend }
+
       const response = await fetch(
         `${currentEnv.atendimentoUrl}/api/atendimentos`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: JSON.stringify({ pergunta: textToSend }),
+          body: JSON.stringify(payload),
         }
       )
 
@@ -158,6 +187,7 @@ export default function App() {
             encaminharParaHumano: data.encaminharParaHumano,
             fontes: data.fontes || [],
             custoEstimadoUsd: data.custoEstimadoUsd ?? 0,
+            provedor: data.provedor || null,
           },
         },
       ])
@@ -237,7 +267,12 @@ export default function App() {
           <button
             type="button"
             className="new-chat-btn"
-            onClick={() => setMessages([])}
+            onClick={handleClearConversation}
+            title={
+              envKey === 'online'
+                ? 'Limpa a tela e o histórico deste cliente no MongoDB'
+                : 'Limpa as mensagens da tela'
+            }
           >
             <span>＋</span> Nova conversa
           </button>
@@ -261,6 +296,24 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {envKey === 'online' && (
+            <div className="sidebar-section">
+              <span className="section-label">Identificação do Cliente (Online)</span>
+              <div className="client-name-box">
+                <input
+                  type="text"
+                  placeholder="Seu nome (2 a 100 caracteres)"
+                  value={nomeCliente}
+                  onChange={(e) => setNomeCliente(e.target.value)}
+                  maxLength={100}
+                />
+                <span className="client-name-hint">
+                  Enviado no JSON <code>{`{ nome, pergunta }`}</code>
+                </span>
+              </div>
+            </div>
+          )}
 
           <div className="sidebar-section">
             <div className="section-header-row">
@@ -353,7 +406,11 @@ export default function App() {
               <div className="empty-logo-ring">
                 <img src={logoImg} alt="Corujinha IA" />
               </div>
-              <h2>Como posso ajudar você hoje?</h2>
+              <h2>
+                {envKey === 'online' && nomeCliente.trim()
+                  ? `Olá, ${nomeCliente.trim()}! Como posso ajudar?`
+                  : 'Como posso ajudar você hoje?'}
+              </h2>
               <p>
                 Consulto a base de conhecimento da COTI Informática via{' '}
                 <strong>MCP</strong> usando <strong>{currentEnv.name}</strong>.
@@ -416,7 +473,9 @@ export default function App() {
                         <span className="pill neutral">
                           {msg.env === 'offline'
                             ? 'Ollama · Gratuito ($0)'
-                            : `OpenAI · $${Number(msg.meta.custoEstimadoUsd).toFixed(6)}`}
+                            : `${msg.meta.provedor || 'OpenAI'} · $${Number(
+                                msg.meta.custoEstimadoUsd
+                              ).toFixed(6)}`}
                         </span>
 
                         {msg.meta.fontes && msg.meta.fontes.length > 0 && (
@@ -478,6 +537,21 @@ export default function App() {
 
         {/* Bottom Floating Input Box */}
         <div className="composer-container">
+          {envKey === 'online' && (
+            <div className="composer-name-row">
+              <label className="inline-name-field">
+                <span>Nome:</span>
+                <input
+                  type="text"
+                  placeholder="Informe seu nome..."
+                  value={nomeCliente}
+                  onChange={(e) => setNomeCliente(e.target.value)}
+                  disabled={loadingChat}
+                  maxLength={100}
+                />
+              </label>
+            </div>
+          )}
           <form
             className="composer-box"
             onSubmit={(e) => {
@@ -497,7 +571,11 @@ export default function App() {
             <button
               type="submit"
               className="send-btn"
-              disabled={loadingChat || !question.trim()}
+              disabled={
+                loadingChat ||
+                !question.trim() ||
+                (envKey === 'online' && nomeCliente.trim().length < 2)
+              }
               title="Enviar pergunta"
             >
               ↑

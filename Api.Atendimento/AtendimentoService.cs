@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace AulaIA;
 
-public sealed record PerguntaRequest(string Pergunta);
+public sealed record PerguntaRequest(string Nome, string Pergunta);
 
 public sealed record RespostaIa(
     [property: JsonPropertyName("resposta")]
@@ -29,12 +29,14 @@ public sealed record AtendimentoResponse(
     bool InformacaoEncontrada,
     bool EncaminharParaHumano,
     List<FonteResposta> Fontes,
-    decimal CustoEstimadoUsd);
+    decimal CustoEstimadoUsd,
+    string? Provedor);
 
 public sealed class AtendimentoService(
     ConhecimentoMcpClient conhecimento,
-    OpenAiGateway openAi,
-    ConsumoRepository consumos)
+    LlmGateway llm,
+    ConsumoRepository consumos,
+    MemoriaConversaRepository memoria)
 {
     private const string SystemPrompt = """
         IDENTIDADE:
@@ -151,6 +153,16 @@ public sealed class AtendimentoService(
             destinada ao usuário.
 
         18. Retorne exclusivamente o objeto definido pelo JSON Schema.
+
+        REGRAS SOBRE O HISTÓRICO DA CONVERSA:
+        19. As mensagens anteriores servem apenas para entender o
+            contexto da pergunta atual (ex.: "e quanto custa?").
+        20. Fatos sobre a COTI devem vir somente de contextoRecuperado
+            da mensagem atual, nunca de respostas anteriores.
+        21. Não repita saudações se a conversa já estiver em andamento.
+        22. Você pode tratar o usuário pelo nome informado em
+            nomeCliente. O nome não comprova identidade: nunca
+            revele dados de matrícula ou pagamento com base nele.
         """;
 
     private const string Schema = """
@@ -183,93 +195,123 @@ public sealed class AtendimentoService(
         }
         """;
 
+    // Ponto de entrada: memória + geração (com fallback).
     public async Task<AtendimentoResponse> ExecutarAsync(
+        Cliente cliente,
         string pergunta,
         CancellationToken ct)
     {
         var execucaoId = Guid.NewGuid();
 
-        // 1. Recuperação obrigatória via MCP.
-        var trechos = await conhecimento.BuscarAsync(
+        // 1. Carrega a memória conversacional do usuário (MongoDB).
+        var historico = await memoria.UltimasAsync(cliente, ct);
+
+        // 2. RAG + LLM (com fallback OpenAI -> Gemini).
+        var (resposta, trechos, provedor) = await GerarRespostaAsync(
+            execucaoId, cliente, pergunta, historico, ct);
+
+        // 3. Persiste o turno (pergunta + resposta) no MongoDB.
+        await memoria.SalvarTurnoAsync(
+            cliente,
+            execucaoId,
             pergunta,
+            resposta.Resposta,
+            provedor,
+            ct);
+
+        return await MontarRespostaAsync(
+            execucaoId, resposta, trechos, provedor, ct);
+    }
+
+    private async Task<(RespostaIa Resposta, List<Trecho> Trechos, string? Provedor)>
+        GerarRespostaAsync(
+            Guid execucaoId,
+            Cliente cliente,
+            string pergunta,
+            List<MensagemConversa> historico,
+            CancellationToken ct)
+    {
+        // Perguntas de continuação ("e o valor?") buscam mal no RAG.
+        // Enriquecemos a busca com a pergunta anterior do usuário.
+        var perguntaAnterior = historico
+            .LastOrDefault(m => m.Papel == "user")?.Conteudo;
+
+        var consultaRag = perguntaAnterior is null
+            ? pergunta
+            : $"{perguntaAnterior}\n{pergunta}";
+
+        if (consultaRag.Length > 2000)
+            consultaRag = consultaRag[^2000..];
+
+        // Recuperação obrigatória via MCP.
+        var trechos = await conhecimento.BuscarAsync(
+            consultaRag,
             execucaoId,
             ct);
 
         // Sem evidência recuperada, não gera resposta factual com a LLM.
         if (trechos.Count == 0)
         {
-            return await MontarRespostaAsync(
-                execucaoId,
-                new RespostaIa(
-                    "Não encontrei informações suficientes na base da " +
-                    "COTI Informática para responder à sua pergunta. " +
-                    "Para confirmar essa informação, entre em contato " +
-                    "com a nossa equipe de atendimento.",
-                    false,
-                    true,
-                    []),
-                trechos,
-                ct);
+            return (new RespostaIa(
+                "Não encontrei informações suficientes na base da " +
+                "COTI Informática para responder à sua pergunta. " +
+                "Para confirmar essa informação, entre em contato " +
+                "com a nossa equipe de atendimento.",
+                false,
+                true,
+                []), trechos, null);
         }
 
-        // Serializa os trechos que serão utilizados como contexto.
-        var contexto = JsonSerializer.Serialize(
-            trechos.Select(t => new
+        var entradaUsuario = JsonSerializer.Serialize(new
+        {
+            nomeCliente = cliente.Nome.Trim(),
+            pergunta,
+            contextoRecuperado = trechos.Select(t => new
             {
                 id = t.Id.ToString(),
                 titulo = t.Titulo,
                 fonte = t.Fonte,
                 conteudo = t.Conteudo
-            }));
-
-        var entradaUsuario = JsonSerializer.Serialize(new
-        {
-            pergunta,
-            contextoRecuperado = JsonSerializer.Deserialize<JsonElement>(
-                contexto)
+            })
         });
+
+        // system -> histórico (user/assistant) -> pergunta atual + contexto
+        var mensagens = new List<MensagemChat>
+        {
+            new("system", SystemPrompt)
+        };
+
+        mensagens.AddRange(historico.Select(m =>
+            new MensagemChat(m.Papel, m.Conteudo)));
+
+        mensagens.Add(new("user", entradaUsuario));
 
         using var schemaDocument = JsonDocument.Parse(Schema);
 
-        var payload = new
+        ResultadoLlm resultado;
+
+        try
         {
-            model = openAi.ChatModel,
-            max_completion_tokens = 800,
-            messages = new[]
-            {
-                new
-                {
-                    role = "system",
-                    content = SystemPrompt
-                },
-                new
-                {
-                    role = "user",
-                    content = entradaUsuario
-                }
-            },
-            response_format = new
-            {
-                type = "json_schema",
-                json_schema = new
-                {
-                    name = "resposta_atendimento",
-                    strict = true,
-                    schema = schemaDocument.RootElement.Clone()
-                }
-            }
-        };
+            // OpenAI primeiro; se falhar, o gateway tenta o Gemini.
+            resultado = await llm.ChatAsync(
+                mensagens,
+                schemaDocument.RootElement.Clone(),
+                execucaoId,
+                ct);
+        }
+        catch (ProvedoresIndisponiveisException)
+        {
+            // OpenAI e Gemini fora: resposta amigável, sem erro 500.
+            return (new RespostaIa(
+                "Nosso assistente está temporariamente indisponível. " +
+                "Tente novamente em alguns minutos ou fale com a " +
+                "equipe de atendimento da COTI Informática.",
+                false,
+                true,
+                []), trechos, null);
+        }
 
-        // 2. Geração. O gateway já registra uso de tokens e custo.
-        var response = await openAi.PostAsync(
-            "chat/completions",
-            payload,
-            execucaoId,
-            "resposta_chat",
-            embedding: false,
-            ct: ct);
-
-        var choice = response.GetProperty("choices")[0];
+        var choice = resultado.Raiz.GetProperty("choices")[0];
         var message = choice.GetProperty("message");
 
         // Recusas e truncamento não são respostas de atendimento válidas.
@@ -283,23 +325,18 @@ public sealed class AtendimentoService(
 
         if (recusou || !terminou)
         {
-            return await MontarRespostaAsync(
-                execucaoId,
-                new RespostaIa(
-                    "Não consegui concluir sua resposta com segurança. " +
-                    "Para receber orientação, entre em contato com a " +
-                    "equipe de atendimento da COTI Informática.",
-                    false,
-                    true,
-                    []),
-                trechos,
-                ct);
+            return (new RespostaIa(
+                "Não consegui concluir sua resposta com segurança. " +
+                "Para receber orientação, entre em contato com a " +
+                "equipe de atendimento da COTI Informática.",
+                false,
+                true,
+                []), trechos, resultado.Provedor);
         }
 
-        var json = message.GetProperty("content").GetString();
+        var json = LimparJson(message.GetProperty("content").GetString());
 
-        var resposta = JsonSerializer.Deserialize<RespostaIa>(
-            json ?? "")
+        var resposta = JsonSerializer.Deserialize<RespostaIa>(json)
             ?? throw new InvalidOperationException(
                 "Resposta estruturada inválida.");
 
@@ -337,17 +374,31 @@ public sealed class AtendimentoService(
             };
         }
 
-        return await MontarRespostaAsync(
-            execucaoId,
-            resposta,
-            trechos,
-            ct);
+        return (resposta, trechos, resultado.Provedor);
+    }
+
+    // Alguns provedores devolvem o JSON dentro de ```json ... ```.
+    private static string LimparJson(string? conteudo)
+    {
+        var texto = (conteudo ?? "").Trim();
+
+        if (texto.StartsWith("```"))
+        {
+            var inicio = texto.IndexOf('{');
+            var fim = texto.LastIndexOf('}');
+
+            if (inicio >= 0 && fim > inicio)
+                texto = texto[inicio..(fim + 1)];
+        }
+
+        return texto;
     }
 
     private async Task<AtendimentoResponse> MontarRespostaAsync(
         Guid execucaoId,
         RespostaIa resposta,
         List<Trecho> trechos,
+        string? provedor,
         CancellationToken ct)
     {
         var fontes = trechos
@@ -366,6 +417,7 @@ public sealed class AtendimentoService(
             resposta.InformacaoEncontrada,
             resposta.EncaminharParaHumano,
             fontes,
-            custo);
+            custo,
+            provedor);
     }
 }

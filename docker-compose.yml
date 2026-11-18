@@ -19,20 +19,50 @@ services:
       timeout: 5s
       retries: 10
 
-  pgadmin:
-    image: dpage/pgadmin4:9
+  # ===== NOVO: memória conversacional =====
+  mongo:
+    image: mongo:8
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: coti@email.com
-      PGADMIN_DEFAULT_PASSWORD: coti
+      MONGO_INITDB_ROOT_USERNAME: coti
+      MONGO_INITDB_ROOT_PASSWORD: coti
     ports:
-      - "127.0.0.1:5053:80"
+      - "127.0.0.1:27017:27017"
     volumes:
-      - pgadmin_data:/var/lib/pgadmin
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongo-express:
+    image: mongo-express:1.0.2
+    restart: unless-stopped
+    environment:
+      # Conexão com o Mongo (usa o nome do serviço "mongo" na rede do compose)
+      ME_CONFIG_MONGODB_URL: mongodb://coti:coti@mongo:27017/?authSource=admin
+      ME_CONFIG_MONGODB_ADMINUSERNAME: coti
+      ME_CONFIG_MONGODB_ADMINPASSWORD: coti
+      # Login da interface web
+      ME_CONFIG_BASICAUTH: "true"
+      ME_CONFIG_BASICAUTH_USERNAME: coti
+      ME_CONFIG_BASICAUTH_PASSWORD: coti
+    ports:
+      - "127.0.0.1:8081:8081"   # Interface web (http://localhost:8081)
     depends_on:
-      postgres:
+      mongo:
         condition: service_healthy
+
+  # ===== NOVO: servidor SMTP falso para simular e-mail =====
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1025:1025"   # SMTP (a API envia aqui)
+      - "127.0.0.1:8025:8025"   # Interface web (caixa de entrada)
 
 volumes:
   postgres_data:
   pgadmin_data:
+  mongo_data:

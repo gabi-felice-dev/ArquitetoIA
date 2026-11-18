@@ -1,6 +1,4 @@
 ﻿using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json;
 using Npgsql;
 
 namespace AulaIA;
@@ -21,7 +19,8 @@ public static class Infra
 
         services.AddSingleton<ConsumoRepository>();
 
-        services.AddHttpClient<OpenAiGateway>(http =>
+        // Cliente nomeado "OpenAI" (provedor principal).
+        services.AddHttpClient(LlmGateway.OpenAi, http =>
         {
             var apiKey = configuration["OpenAI:ApiKey"];
 
@@ -30,11 +29,35 @@ public static class Infra
                     "OpenAI:ApiKey não configurada.");
 
             http.BaseAddress = new Uri("https://api.openai.com/v1/");
-            http.Timeout = TimeSpan.FromSeconds(90);
+
+            // Timeout curto: se a OpenAI travar, o fallback entra logo.
+            http.Timeout = TimeSpan.FromSeconds(
+                configuration.GetValue("OpenAI:TimeoutSegundos", 30));
 
             http.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", apiKey);
         });
+
+        // Cliente nomeado "Gemini" (fallback) via endpoint compatível OpenAI.
+        services.AddHttpClient(LlmGateway.Gemini, http =>
+        {
+            var apiKey = configuration["Gemini:ApiKey"];
+
+            if (string.IsNullOrWhiteSpace(apiKey))
+                throw new InvalidOperationException(
+                    "Gemini:ApiKey não configurada.");
+
+            http.BaseAddress = new Uri(
+                "https://generativelanguage.googleapis.com/v1beta/openai/");
+
+            http.Timeout = TimeSpan.FromSeconds(
+                configuration.GetValue("Gemini:TimeoutSegundos", 60));
+
+            http.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", apiKey);
+        });
+
+        services.AddSingleton<LlmGateway>();
     }
 }
 
@@ -103,98 +126,5 @@ public sealed class ConsumoRepository(NpgsqlDataSource dataSource)
         cmd.Parameters.AddWithValue("execucao", execucaoId);
 
         return Convert.ToDecimal(await cmd.ExecuteScalarAsync(ct));
-    }
-}
-
-public sealed class OpenAiGateway(
-    HttpClient http,
-    IConfiguration configuration,
-    ConsumoRepository consumos)
-{
-    public string EmbeddingModel =>
-        configuration["OpenAI:EmbeddingModel"]!;
-
-    public string ChatModel =>
-        configuration["OpenAI:ChatModel"]!;
-
-    public async Task<JsonElement> PostAsync(
-        string endpoint,
-        object payload,
-        Guid execucaoId,
-        string operacao,
-        bool embedding,
-        CancellationToken ct)
-    {
-        using var response = await http.PostAsJsonAsync(endpoint, payload, ct);
-
-        // Leia o corpo também quando ocorrer um erro.
-        var body = await response.Content.ReadAsStringAsync(ct);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            // Diagnóstico local durante o desenvolvimento.
-            Console.WriteLine($"Endpoint: {endpoint}");
-            Console.WriteLine($"Status: {(int)response.StatusCode}");
-            Console.WriteLine($"Erro OpenAI: {body}");
-
-            throw new HttpRequestException(
-                $"OpenAI retornou HTTP {(int)response.StatusCode}. " +
-                $"Detalhes: {body}",
-                null,
-                response.StatusCode);
-        }
-
-        using var document = JsonDocument.Parse(body);
-
-        var root = document.RootElement;
-        var usage = root.GetProperty("usage");
-
-        var entrada = usage.GetProperty("prompt_tokens").GetInt32();
-
-        var saida = embedding
-            ? 0
-            : usage.GetProperty("completion_tokens").GetInt32();
-
-        var cache = 0;
-
-        if (!embedding
-            && usage.TryGetProperty("prompt_tokens_details", out var details)
-            && details.ValueKind == JsonValueKind.Object
-            && details.TryGetProperty("cached_tokens", out var cached))
-        {
-            cache = cached.GetInt32();
-        }
-
-        var precoEntrada = configuration.GetValue<decimal>(
-            embedding
-                ? "OpenAI:EmbeddingInputPerMillion"
-                : "OpenAI:ChatInputPerMillion");
-
-        var precoCache = embedding
-            ? 0m
-            : configuration.GetValue<decimal>(
-                "OpenAI:ChatCachedInputPerMillion");
-
-        var precoSaida = embedding
-            ? 0m
-            : configuration.GetValue<decimal>(
-                "OpenAI:ChatOutputPerMillion");
-
-        var modelo = root.GetProperty("model").GetString()!;
-
-        // Registrar antes de interpretar o conteúdo gerado:
-        // recusas ou respostas truncadas também podem consumir tokens.
-        await consumos.RegistrarAsync(
-            execucaoId,
-            operacao,
-            modelo,
-            entrada,
-            cache,
-            saida,
-            precoEntrada,
-            precoCache,
-            precoSaida);
-
-        return root.Clone();
     }
 }
